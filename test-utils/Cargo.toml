@@ -13,7 +13,7 @@ tokio = {version = "1.15", features = ["full"] }
 async-channel = "1.6"
 log = { version = "0.4" }
 rand = "0.8"
-executor = { path = "../../la1/solution", package = "assignment-1-solution" }
+executor = { path = "../../dsassignment1/solution", package = "assignment-1-solution" }
 assignment-3-solution = { path = "../solution" }
 
 [lib]

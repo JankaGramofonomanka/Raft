@@ -17,7 +17,7 @@ log = "0.4"
 rand = "0.8"
 base64 = "0.13"
 sha2 = "0.9"
-executor = { path = "../../la1/solution", package = "assignment-1-solution" }
+executor = { path = "../../dsassignment1/solution", package = "assignment-1-solution" }
 
 [lib]
 name = "assignment_3_solution"
