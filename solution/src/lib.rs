@@ -78,6 +78,16 @@ impl Raft {
         ));
     }
 
+    fn reset_heartbeat(&mut self, interval: Duration) {
+        self.timer_abort.store(true, Ordering::Relaxed);
+        self.timer_abort = Arc::new(AtomicBool::new(false));
+        tokio::spawn(run_heartbeat(
+            self.self_ref.as_ref().unwrap().clone(),
+            interval,
+            self.timer_abort.clone(),
+        ));
+    }
+
     /// Set the process's term to the higher number.
     fn update_term(&mut self, new_term: u64) {
         assert!(self.state.current_term < new_term);
@@ -215,6 +225,8 @@ enum ProcessType {
     Leader,
 }
 
+struct Heartbeat;
+
 struct Timeout;
 
 struct Init {
@@ -227,6 +239,7 @@ impl Handler<Init> for Raft {
         
         self.self_ref = Some(msg.self_ref);
         self.reset_timer(self.config.election_timeout_range.clone());
+        self.reset_heartbeat(self.config.heartbeat_timeout);
         
     }
 }
@@ -244,6 +257,21 @@ async fn run_timer(
     }
 }
 
+/// Periodically send `Heartbeat` messages to a module
+async fn run_heartbeat(
+    raft_ref: ModuleRef<Raft>,
+    interval: Duration,
+    abort: Arc<AtomicBool>
+) {
+    let mut interval = tokio::time::interval(interval);
+    while !abort.load(Ordering::Relaxed) {
+        raft_ref.send(Heartbeat).await;
+        interval.tick().await;
+    }
+}
+
+
+
 /// Handle timer timeout.
 #[async_trait::async_trait]
 impl Handler<Timeout> for Raft {
@@ -252,16 +280,28 @@ impl Handler<Timeout> for Raft {
         match &mut self.process_type {
             ProcessType::Follower {}        => { self.init_vote().await; }
             ProcessType::Candidate { .. }   => { self.init_vote().await; }
-            ProcessType::Leader             => { 
-
-                /* The handler for `RunHeartbeat` sends exactly 10 
-                    * heartbeats and stops. The `RunHeartbeat` will be resent 
-                    * on every timeout (if the process is till a leader)
-                    */
-                //self.self_ref.as_ref().unwrap().send(RunHeartbeat).await;
-            }
+            ProcessType::Leader             => { }
         }
         
     }
 }
+
+#[async_trait::async_trait]
+impl Handler<Heartbeat> for Raft {
+    async fn handle(&mut self, _: Heartbeat) {
+        
+        match &mut self.process_type {
+            ProcessType::Leader             => { 
+
+                // TODO: select a correct message to broadcast
+                todo!();
+            }
+
+            // Only a leader sends a heartbeat
+            _ => {}
+        }
+        
+    }
+}
+
 
