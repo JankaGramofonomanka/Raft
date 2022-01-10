@@ -102,6 +102,14 @@ impl Raft {
         self.storage.put(STATE_KEY, &bincode::serialize(&self.state).unwrap()[..]).await.unwrap();
     }
 
+    /// Common message processing.
+    fn msg_received(&mut self, msg: &RaftMessage) {
+        if msg.header.term > self.state.current_term {
+            self.update_term(msg.header.term);
+            self.process_type = ProcessType::Follower;
+        }
+    }
+
     /// Broadcast a message
     async fn broadcast(&mut self, content: RaftMessageContent) {
         for id in &self.config.servers {
@@ -167,16 +175,100 @@ impl Raft {
             .await;
         }
     }
+
+    async fn append_entries_vote(&mut self, source: Uuid, args: AppendEntriesArgs) {
+        todo!();
+    }
+
+    async fn append_entries_vote_resp(&mut self, source: Uuid, args: AppendEntriesResponseArgs) {
+        todo!();
+    }
+
+    async fn handle_request_vote(&mut self, source: Uuid, args: RequestVoteArgs) {
+
+        // TODO: check if the candidate log is up to date
+
+        let granted = match &mut self.process_type {
+            ProcessType::Follower => { 
+                match &mut self.state.voted_for {
+                    None    => true,
+                    Some(_) => false,
+                }
+            },
+            
+            ProcessType::Candidate { .. } => false,
+            
+            ProcessType::Leader => { 
+                /* if `msg.header.term < self.state.current_term`
+                * then the program wouldn't reach this place
+                */
+
+                self.process_type = ProcessType::Follower;
+                false
+            },
+        };
+
+        if granted { 
+            self.state.voted_for = Some(source);
+            self.update_state().await;
+        }
+
+        self.sender.send(
+            &source,
+            RaftMessage {
+                header: RaftMessageHeader {
+                    term:   self.state.current_term,
+                    source: self.config.self_id,
+                },
+                content: RaftMessageContent::RequestVoteResponse(
+                    RequestVoteResponseArgs {
+                        vote_granted: granted,
+                    }
+                ),
+            }
+        ).await;
+    
+    }
+
+    async fn handle_request_vote_resp(&mut self, source: Uuid, args: RequestVoteResponseArgs) {
+        match &mut self.process_type {
+            ProcessType::Follower => { /* nothing to do */ },
+            
+            ProcessType::Candidate { votes_received } => {
+                if args.vote_granted {
+                    votes_received.insert(source);
+
+                    if votes_received.len() > self.config.servers.len() / 2 {
+                        
+                        self.process_type = ProcessType::Leader;
+                    }
+                }
+            },
+            
+            ProcessType::Leader => { /* nothing to do */ },
+        }
+    }
+
 }
 
 #[async_trait::async_trait]
 impl Handler<RaftMessage> for Raft {
     async fn handle(&mut self, msg: RaftMessage) {
+        
+        self.msg_received(&msg);
+
         match msg.content {
-            RaftMessageContent::AppendEntries(_)            => todo!(),
-            RaftMessageContent::AppendEntriesResponse(_)    => todo!(),
-            RaftMessageContent::RequestVote(_)              => todo!(),
-            RaftMessageContent::RequestVoteResponse(_)      => todo!(),
+            RaftMessageContent::AppendEntries(args)
+                => self.append_entries_vote(msg.header.source, args).await,
+
+            RaftMessageContent::AppendEntriesResponse(args)
+                => self.append_entries_vote_resp(msg.header.source, args).await,
+
+            RaftMessageContent::RequestVote(args)
+                => self.handle_request_vote(msg.header.source, args).await,
+
+            RaftMessageContent::RequestVoteResponse(args)
+                => self.handle_request_vote_resp(msg.header.source, args).await,
 
             RaftMessageContent::InstallSnapshot(_)
                 => unimplemented!("Snapshots omitted"),
