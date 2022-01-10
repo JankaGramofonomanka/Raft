@@ -1,11 +1,12 @@
-use std::time::SystemTime;
+use std::ops::RangeInclusive;
+use std::time::{Duration, SystemTime};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use rand::Rng;
 
 use executor::{Handler, ModuleRef, System};
 
@@ -14,7 +15,6 @@ pub use domain::*;
 mod domain;
 
 const STATE_KEY: &str = "STATE";
-const DEFAULT_DURATION: u64 = 10000;
 
 pub struct Raft {
     // TODO you can add fields to this struct.
@@ -25,8 +25,6 @@ pub struct Raft {
     process_type:   ProcessType,
     timer_abort:    Arc<AtomicBool>,
     self_ref:       Option<ModuleRef<Self>>,
-
-    election_timeout: Duration,
 
 }
 
@@ -60,8 +58,6 @@ impl Raft {
                 process_type:   ProcessType::Follower,
                 timer_abort:    Arc::new(AtomicBool::new(false)),
                 self_ref:       None,
-
-                election_timeout: Duration::from_millis(DEFAULT_DURATION),
             })
             .await;
         self_ref
@@ -72,12 +68,12 @@ impl Raft {
         self_ref
     }
 
-    fn reset_timer(&mut self, interval: Duration) {
+    fn reset_timer(&mut self, interval_range: RangeInclusive<Duration>) {
         self.timer_abort.store(true, Ordering::Relaxed);
         self.timer_abort = Arc::new(AtomicBool::new(false));
         tokio::spawn(run_timer(
             self.self_ref.as_ref().unwrap().clone(),
-            interval,
+            interval_range,
             self.timer_abort.clone(),
         ));
     }
@@ -137,7 +133,7 @@ impl Raft {
 
         self.update_term(self.state.current_term + 1);
         {self.update_state().await;}
-        self.reset_timer(self.election_timeout);
+        self.reset_timer(self.config.election_timeout_range.clone());
 
         let mut votes = HashSet::new();
         votes.insert(self.config.self_id);
@@ -230,16 +226,19 @@ impl Handler<Init> for Raft {
     async fn handle(&mut self, msg: Init) {
         
         self.self_ref = Some(msg.self_ref);
-        self.reset_timer(self.election_timeout);
+        self.reset_timer(self.config.election_timeout_range.clone());
         
     }
 }
 
-async fn run_timer(raft_ref: ModuleRef<Raft>, interval: Duration, abort: Arc<AtomicBool>) {
-    let mut interval = tokio::time::interval(interval);
-    interval.tick().await;
-    interval.tick().await;
+async fn run_timer(
+    raft_ref: ModuleRef<Raft>,
+    interval_range: RangeInclusive<Duration>,
+    abort: Arc<AtomicBool>
+) {
     while !abort.load(Ordering::Relaxed) {
+        let duration = rand::thread_rng().gen_range(interval_range.clone());
+        let mut interval = tokio::time::interval(duration);
         raft_ref.send(Timeout).await;
         interval.tick().await;
     }
