@@ -6,6 +6,11 @@ use async_channel::Sender;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+
+// -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+// OTHER
+// -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+
 // You do not have to provide any implementation of this trait.
 #[async_trait::async_trait]
 pub trait StableStorage: Send + Sync {
@@ -48,6 +53,9 @@ pub struct ServerConfig {
     pub session_expiration: Duration,
 }
 
+// -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+// CLIENT REQUEST / RESPONSE
+// -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
 pub struct ClientRequest {
     pub reply_to: Sender<ClientRequestResponse>,
     pub content: ClientRequestContent,
@@ -80,6 +88,7 @@ pub enum ClientRequestResponse {
     RegisterClientResponse(RegisterClientResponseArgs),
 }
 
+// ----------------------------------------------------------------------------
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandResponseArgs {
     pub client_id: Uuid,
@@ -94,6 +103,7 @@ pub enum CommandResponseContent {
     SessionExpired,
 }
 
+// ----------------------------------------------------------------------------
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotResponseArgs {
     pub content: SnapshotResponseContent,
@@ -105,6 +115,7 @@ pub enum SnapshotResponseContent {
     NothingToSnapshot { last_included_index: usize },
 }
 
+// ----------------------------------------------------------------------------
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddServerResponseArgs {
     pub new_server: Uuid,
@@ -120,6 +131,7 @@ pub enum AddServerResponseContent {
     AlreadyPresent,
 }
 
+// ----------------------------------------------------------------------------
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoveServerResponseArgs {
     pub old_server: Uuid,
@@ -134,6 +146,7 @@ pub enum RemoveServerResponseContent {
     NotPresent,
 }
 
+// ----------------------------------------------------------------------------
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisterClientResponseArgs {
     pub content: RegisterClientResponseContent,
@@ -145,6 +158,9 @@ pub enum RegisterClientResponseContent {
     NotLeader { leader_hint: Option<Uuid> },
 }
 
+// -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+// RAFT MSG
+// -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct RaftMessage {
     pub header: RaftMessageHeader,
@@ -167,6 +183,7 @@ pub enum RaftMessageContent {
     InstallSnapshotResponse(InstallSnapshotResponseArgs),
 }
 
+// ----------------------------------------------------------------------------
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct AppendEntriesArgs {
     pub prev_log_index: usize,
@@ -196,23 +213,27 @@ pub enum LogEntryContent {
     RegisterClient,
 }
 
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct AppendEntriesResponseArgs {
     pub success: bool,
     pub last_log_index: usize,
 }
 
+// ----------------------------------------------------------------------------
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct RequestVoteArgs {
     pub last_log_index: usize,
     pub last_log_term: u64,
 }
 
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct RequestVoteResponseArgs {
     pub vote_granted: bool,
 }
 
+// ----------------------------------------------------------------------------
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct InstallSnapshotArgs {
     pub last_included_index: usize,
@@ -231,6 +252,7 @@ pub struct ClientSession {
     pub lowest_sequence_num_without_response: u64,
 }
 
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct InstallSnapshotResponseArgs {
     pub last_included_index: usize,
