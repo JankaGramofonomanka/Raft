@@ -8,6 +8,7 @@ mod domain;
 
 pub struct Raft {
     // TODO you can add fields to this struct.
+
 }
 
 impl Raft {
@@ -28,14 +29,31 @@ impl Raft {
 #[async_trait::async_trait]
 impl Handler<RaftMessage> for Raft {
     async fn handle(&mut self, msg: RaftMessage) {
-        todo!()
+        match msg.content {
+            RaftMessageContent::AppendEntries(_)            => todo!(),
+            RaftMessageContent::AppendEntriesResponse(_)    => todo!(),
+            RaftMessageContent::RequestVote(_)              => todo!(),
+            RaftMessageContent::RequestVoteResponse(_)      => todo!(),
+
+            RaftMessageContent::InstallSnapshot(_)
+                => unimplemented!("Snapshots omitted"),
+
+            RaftMessageContent::InstallSnapshotResponse(_)
+                => unimplemented!("Snapshots omitted"),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl Handler<ClientRequest> for Raft {
     async fn handle(&mut self, msg: ClientRequest) {
-        todo!()
+        match msg.content {
+            ClientRequestContent::Command { .. }      => todo!(),
+            ClientRequestContent::Snapshot            => unimplemented!("Snapshots omitted"),
+            ClientRequestContent::AddServer { .. }    => unimplemented!("Cluster membership changes omitted"),
+            ClientRequestContent::RemoveServer { .. } => unimplemented!("Cluster membership changes omitted"),
+            ClientRequestContent::RegisterClient      => todo!(),
+        }
     }
 }
 
