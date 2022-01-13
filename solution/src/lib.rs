@@ -43,12 +43,18 @@ impl Raft {
         message_sender:             Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
 
+        let first_entry = LogEntry {
+            content: LogEntryContent::Configuration { servers: config.servers.clone() },
+            term: 0,
+            timestamp: first_log_entry_timestamp,
+        };
+
         let persistent_state = match stable_storage.get(STATE_KEY).await {
             Some(data) => bincode::deserialize(&data[..]).unwrap(),
             None => PersistentState {
                 current_term:       0,
                 vote:               Vote::NoVote,
-                log:                vec![],
+                log:                vec![first_entry],
             }
         };
 
@@ -522,7 +528,7 @@ impl Raft {
     }
 
     fn get_last_log_index(&self) -> usize {
-        self.persistent_state.log.len()
+        self.persistent_state.log.len() - 1
     }
 
     fn get_last_log_term(&self) -> u64 {
