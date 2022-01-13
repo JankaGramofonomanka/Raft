@@ -52,6 +52,9 @@ pub enum ProcessType {
 pub struct LeaderData {
     pub(crate) next_index:  HashMap<Uuid, usize>,
     pub(crate) match_index: HashMap<Uuid, usize>,
+
+    // Number of followers that have `match_index` higher than `commit_index` of the leader
+    pub(crate) num_updated_servers: usize,
 }
 
 pub struct Heartbeat;

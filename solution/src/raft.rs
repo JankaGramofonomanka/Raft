@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::cmp::min;
 
 use uuid::Uuid;
-
+use async_channel::Sender;
 
 use executor::{Handler, ModuleRef, System};
 
@@ -241,8 +241,18 @@ impl Raft {
     fn update_match_index(&mut self, id: Uuid, index: usize) {
         match &mut self.volatile_state.leader_data {
             None => panic!("leader_data undefined"),
-            Some(LeaderData { match_index, .. }) => {
-                match_index.insert(id, index);
+            Some(data) => {
+                let old_index = data.match_index[&id];
+                data.match_index.insert(id, index);
+                
+                if index > self.volatile_state.commit_index 
+                && self.volatile_state.commit_index >= old_index {
+                    
+                    data.num_updated_servers += 1;
+                    if data.num_updated_servers > self.config.servers.len() {
+                        self.update_commit_index();
+                    }
+                }
             }
         }
     }
@@ -250,16 +260,76 @@ impl Raft {
     fn get_next_index(&self, id: &Uuid) -> usize {
         match &self.volatile_state.leader_data {
             None => panic!("leader_data undefined"),
-            Some(LeaderData { next_index, .. }) => {
-                next_index[id]
+            Some(data) => {
+                data.next_index[id]
             }
         }
+    }
+
+    fn get_match_index(&self, id: &Uuid) -> usize {
+        match &self.volatile_state.leader_data {
+            None => panic!("leader_data undefined"),
+            Some(data) => {
+                data.match_index[id]
+            }
+        }
+    }
+
+
+    fn update_commit_index(&mut self) {
+
+        let mut num_updated_servers = None;
+
+        match &self.volatile_state.leader_data {
+            None => { /* Only a leader should call this method */ }
+            Some(data) => {
+                // Find a maximal index such that a majority of servers 
+                // matches the leaders log up to that index
+                let mut match_index: Vec<usize> = data.match_index.values().cloned().collect();
+                match_index.sort();
+                let i = match_index.len() / 2;
+                let max_commit_index = match_index[i];
+                
+                if max_commit_index > self.volatile_state.commit_index
+                && self.get_term(max_commit_index) == self.persistent_state.current_term {
+
+                    // Update `commit_index`
+                    self.volatile_state.commit_index = max_commit_index;
+                    
+                    // Update `num_updated_servers`
+                    let newer_commits: Vec<usize>
+                        = match_index.into_iter().filter(|id| *id > max_commit_index).collect();
+                    
+                        num_updated_servers = Some(newer_commits.len());
+                }
+
+                
+                
+                
+            }
+        }
+
+        // Update `num_updated_servers`
+        match &mut self.volatile_state.leader_data {
+            None => {}
+            Some(data) => {
+                match num_updated_servers {
+                    None => {},
+                    Some(n) => { data.num_updated_servers = n; },
+                }
+            }
+        }
+        
+        
     }
 
 
     // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
     // HANDLERS 
     // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+
+    // Raft handlers ----------------------------------------------------------
+
     async fn handle_append_entries(
         &mut self,
         msg_header: RaftMessageHeader,
@@ -427,8 +497,9 @@ impl Raft {
                         
                         self.volatile_state.process_type = ProcessType::Leader {};
                         self.volatile_state.leader_data = Some(LeaderData {
-                            next_index:  self.init_next_index(),
-                            match_index: self.init_match_index(),
+                            next_index:             self.init_next_index(),
+                            match_index:            self.init_match_index(),
+                            num_updated_servers:    0,
                         });
 
                         // `AppendEntries` will be sent when handling the next `Heartbeat` message
@@ -441,9 +512,22 @@ impl Raft {
         }
     }
 
+    // Client handlers --------------------------------------------------------
+    async fn handle_command(
+        &mut self,
+        reply_to: Sender<ClientRequestResponse>,
+        command: Vec<u8>,
+        client_id: Uuid,
+        sequence_num: u64,
+        lowest_sequence_num_without_response: u64,
+    ) {
+        todo!()
+    }
 
-    // Other utils ------------------------------------------------------------
-    
+    // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+    // More Utils
+    // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+
     /// Initialize the vote
     async fn init_vote(&mut self) {
 
@@ -621,7 +705,19 @@ impl Handler<RaftMessage> for Raft {
 impl Handler<ClientRequest> for Raft {
     async fn handle(&mut self, msg: ClientRequest) {
         match msg.content {
-            ClientRequestContent::Command { .. }      => todo!(),
+            ClientRequestContent::Command {
+                command,
+                client_id,
+                sequence_num,
+                lowest_sequence_num_without_response,
+            } => self.handle_command(
+                msg.reply_to,
+                command,
+                client_id,
+                sequence_num,
+                lowest_sequence_num_without_response
+            ).await,
+
             ClientRequestContent::Snapshot            => unimplemented!("Snapshots omitted"),
             ClientRequestContent::AddServer { .. }    => unimplemented!("Cluster membership changes omitted"),
             ClientRequestContent::RemoveServer { .. } => unimplemented!("Cluster membership changes omitted"),
