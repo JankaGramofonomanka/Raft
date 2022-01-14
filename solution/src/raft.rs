@@ -127,19 +127,24 @@ impl Raft {
         if msg.header.term > self.persistent_state.current_term {
             self.update_term(msg.header.term);
 
-            match self.volatile_state.process_type {
-                ProcessType::Leader => {
-                    for entry in &self.persistent_state.log[self.volatile_state.commit_index..] {
-                        self.respond_not_leader(entry).await;
-                    }
-                },
-
-                _ => {}
-            }
-            self.volatile_state.process_type = ProcessType::Follower;
+            self.convert_to_follower().await;
             self.persistent_state.vote = Vote::Leader(msg.header.source);
-            self.volatile_state.leader_data = None;
+            
         }
+    }
+
+    async fn convert_to_follower(&mut self) {
+        match self.volatile_state.process_type {
+            ProcessType::Leader => {
+                for entry in &self.persistent_state.log[self.volatile_state.commit_index..] {
+                    self.respond_not_leader(entry).await;
+                }
+            },
+
+            _ => {}
+        }
+        self.volatile_state.process_type = ProcessType::Follower;
+        self.volatile_state.leader_data = None;
     }
 
     // send / broadcast -------------------------------------------------------
@@ -287,6 +292,11 @@ impl Raft {
         }
     }
 
+    fn mark_successful_heartbeat(&mut self, source: Uuid) {
+        let data = self.get_leader_data_mut();
+        data.successes.insert(source);
+    }
+
     async fn update_commit_index(&mut self) {
 
         let mut num_updated_servers = None;
@@ -404,6 +414,7 @@ impl Raft {
                 */
 
                 if args.success {
+                    self.mark_successful_heartbeat(msg_header.source);
                     self.update_next_index(msg_header.source, args.last_log_index + 1);
                     self.update_match_index(msg_header.source, args.last_log_index).await;
 
@@ -510,6 +521,7 @@ impl Raft {
                             match_index:            self.init_match_index(),
                             num_updated_servers:    0,
                             reply_to:               HashMap::new(),
+                            successes:              HashSet::new(),
                         });
 
                         // `AppendEntries` will be sent when handling the next `Heartbeat` message
@@ -872,7 +884,14 @@ impl Handler<Timeout> for Raft {
         match &mut self.volatile_state.process_type {
             ProcessType::Follower {}        => { self.init_vote().await; }
             ProcessType::Candidate { .. }   => { self.init_vote().await; }
-            ProcessType::Leader             => { }
+            ProcessType::Leader             => {
+
+                let data = self.get_leader_data();
+                if data.successes.len() <= self.config.servers.len() / 2 {
+                    self.convert_to_follower().await;
+                }
+                
+            }
         }
         
     }
