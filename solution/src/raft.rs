@@ -87,12 +87,12 @@ impl Raft {
 
     // timers -----------------------------------------------------------------
     
-    fn reset_timer(&mut self, interval_range: RangeInclusive<Duration>) {
+    fn reset_timer(&mut self) {
         self.timer_abort.store(true, Ordering::Relaxed);
         self.timer_abort = Arc::new(AtomicBool::new(false));
         tokio::spawn(run_timer(
             self.self_ref.as_ref().unwrap().clone(),
-            interval_range,
+            self.config.election_timeout_range.clone(),
             self.timer_abort.clone(),
         ));
     }
@@ -127,6 +127,7 @@ impl Raft {
         if msg.header.term > self.persistent_state.current_term {
             self.update_term(msg.header.term);
             self.volatile_state.process_type = ProcessType::Follower;
+            self.persistent_state.vote = Vote::Leader(msg.header.source);
             self.volatile_state.leader_data = None;
         }
     }
@@ -367,7 +368,11 @@ impl Raft {
             // TODO is return necessary?
             return;
 
-        } else if self.prev_log_entry_matches(args.prev_log_index, args.prev_log_term) {
+        }
+        
+        self.reset_timer();
+
+        if self.prev_log_entry_matches(args.prev_log_index, args.prev_log_term) {
 
             self.add_log_entries(args.entries, args.prev_log_index);
             self.send(
@@ -590,7 +595,7 @@ impl Raft {
     async fn init_vote(&mut self) {
 
         self.update_term(self.persistent_state.current_term + 1);
-        self.reset_timer(self.config.election_timeout_range.clone());
+        self.reset_timer();
 
         let mut votes = HashSet::new();
         votes.insert(self.config.self_id);
@@ -844,7 +849,7 @@ impl Handler<Init> for Raft {
     async fn handle(&mut self, msg: Init) {
         
         self.self_ref = Some(msg.self_ref);
-        self.reset_timer(self.config.election_timeout_range.clone());
+        self.reset_timer();
         self.reset_heartbeat();
         
     }
