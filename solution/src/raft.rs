@@ -183,7 +183,7 @@ impl Raft {
             // Check if `self` is still a leader in every iteration to avoid a 
             // panic in `get_next_index` call
             match &self.volatile_state.process_type {
-                ProcessType::Leader {} => {
+                ProcessType::Leader => {
                     let prev_index = self.get_next_index(&id) - 1;
                     self.sender
                     .send(
@@ -229,54 +229,54 @@ impl Raft {
         }
     }
 
-    fn update_next_index(&mut self, id: Uuid, index: usize) {
-        match &mut self.volatile_state.leader_data {
+    fn get_leader_data(&self) -> &LeaderData {
+        match &self.volatile_state.leader_data {
             None => panic!("leader_data undefined"),
-            Some(LeaderData { next_index, .. }) => {
-                next_index.insert(id, index);
-            }
+            Some(data) => data
         }
     }
 
-    fn update_match_index(&mut self, id: Uuid, index: usize) {
+    fn get_leader_data_mut(&mut self) -> &mut LeaderData {
         match &mut self.volatile_state.leader_data {
             None => panic!("leader_data undefined"),
-            Some(data) => {
-                let old_index = data.match_index[&id];
-                data.match_index.insert(id, index);
-                
-                if index > self.volatile_state.commit_index 
-                && self.volatile_state.commit_index >= old_index {
-                    
-                    data.num_updated_servers += 1;
-                    if data.num_updated_servers > self.config.servers.len() {
-                        self.update_commit_index();
-                    }
-                }
-            }
+            Some(data) => data
         }
     }
 
     fn get_next_index(&self, id: &Uuid) -> usize {
-        match &self.volatile_state.leader_data {
-            None => panic!("leader_data undefined"),
-            Some(data) => {
-                data.next_index[id]
-            }
-        }
+        let data = self.get_leader_data();
+        data.next_index[id]
     }
 
     fn get_match_index(&self, id: &Uuid) -> usize {
-        match &self.volatile_state.leader_data {
-            None => panic!("leader_data undefined"),
-            Some(data) => {
-                data.match_index[id]
+        let data = self.get_leader_data();
+        data.match_index[id]
+    }
+
+    // updates ----------------------------------------------------------------
+    fn update_next_index(&mut self, id: Uuid, index: usize) {
+        let data = self.get_leader_data_mut(); 
+        data.next_index.insert(id, index);
+    }
+
+    async fn update_match_index(&mut self, id: Uuid, index: usize) {
+        
+        let commit_index = self.volatile_state.commit_index;
+
+        let data = self.get_leader_data_mut();
+        let old_index = data.match_index[&id];
+        data.match_index.insert(id, index);
+        
+        if index > commit_index && commit_index >= old_index {
+            
+            data.num_updated_servers += 1;
+            if data.num_updated_servers > self.config.servers.len() {
+                self.update_commit_index().await;
             }
         }
     }
 
-
-    fn update_commit_index(&mut self) {
+    async fn update_commit_index(&mut self) {
 
         let mut num_updated_servers = None;
 
@@ -294,7 +294,7 @@ impl Raft {
                 && self.get_term(max_commit_index) == self.persistent_state.current_term {
 
                     // Update `commit_index`
-                    self.volatile_state.commit_index = max_commit_index;
+                    self.commit_up_to_index(max_commit_index).await;
                     
                     // Update `num_updated_servers`
                     let newer_commits: Vec<usize>
@@ -302,10 +302,6 @@ impl Raft {
                     
                         num_updated_servers = Some(newer_commits.len());
                 }
-
-                
-                
-                
             }
         }
 
@@ -319,9 +315,32 @@ impl Raft {
                 }
             }
         }
-        
-        
     }
+
+    /*
+    async fn commit_one_entry(&self) {
+        
+        let index = self.volatile_state.commit_index + 1;
+        let entry = self.persistent_state.log[index];
+        
+        match &entry.content {
+            LogEntryContent::Command {
+                data,
+                client_id,
+                sequence_num,
+                lowest_sequence_num_without_response,
+            } => {
+                let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
+                    client_id,
+                    sequence_num,
+                    content: CommandResponseContent::CommandApplied { output: Vec<u8> },
+                });
+            },
+
+            _ => { /* Nothing to respond to */ },
+        }
+    }
+    */
 
 
     // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
@@ -385,7 +404,7 @@ impl Raft {
     ) {
 
         match self.volatile_state.process_type {
-            ProcessType::Leader {} => {
+            ProcessType::Leader => {
 
                 // TODO: why this was in the algo?
                 /*
@@ -396,7 +415,7 @@ impl Raft {
 
                 if args.success {
                     self.update_next_index(msg_header.source, args.last_log_index + 1);
-                    self.update_match_index(msg_header.source, args.last_log_index);
+                    self.update_match_index(msg_header.source, args.last_log_index).await;
 
                     if args.last_log_index < self.get_last_log_index() {
                         self.send_entries(&msg_header.source).await;
@@ -449,7 +468,7 @@ impl Raft {
                 
                 ProcessType::Candidate { .. } => false,
                 
-                ProcessType::Leader { .. } => { 
+                ProcessType::Leader => { 
                     /* here `msg_header.term == self.persistent_state.current_term`,
                     * because otherwise the program wouldn' reach this place or 
                     * it would make these values equal
@@ -495,11 +514,12 @@ impl Raft {
 
                     if votes_received.len() > self.config.servers.len() / 2 {
                         
-                        self.volatile_state.process_type = ProcessType::Leader {};
+                        self.volatile_state.process_type = ProcessType::Leader;
                         self.volatile_state.leader_data = Some(LeaderData {
                             next_index:             self.init_next_index(),
                             match_index:            self.init_match_index(),
                             num_updated_servers:    0,
+                            reply_to:               HashMap::new(),
                         });
 
                         // `AppendEntries` will be sent when handling the next `Heartbeat` message
@@ -521,7 +541,45 @@ impl Raft {
         sequence_num: u64,
         lowest_sequence_num_without_response: u64,
     ) {
-        todo!()
+
+        match self.volatile_state.process_type {
+            ProcessType::Leader {} => {
+                let entry = LogEntry {
+                    content: LogEntryContent::Command {
+                        data: command,
+                        client_id,
+                        sequence_num,
+                        lowest_sequence_num_without_response,
+                    },
+                    term: self.persistent_state.current_term,
+                    timestamp: SystemTime::now(),
+                };
+        
+                let leader_data = self.get_leader_data_mut();
+                leader_data.reply_to.insert(client_id, reply_to);
+                
+                self.add_log_entry(entry);
+                self.send_entries_to_all().await;
+            }
+
+            _ => {
+                let leader_hint = match self.persistent_state.vote {
+                    Vote::Leader(leader_id) => Some(leader_id),
+                    _                       => None,
+                };
+
+                let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
+                    client_id,
+                    sequence_num,
+                    content: CommandResponseContent::NotLeader { leader_hint },
+                });
+
+                match reply_to.send(response).await {
+                    _ => { /* Ignore errors, nothing to do if success */ },
+                }
+            }
+        }
+        
     }
 
     // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
@@ -568,9 +626,55 @@ impl Raft {
             let serialized = bincode::serialize(&entry).unwrap();
             {self.state_machine.apply(&serialized[..]).await;}
             self.volatile_state.last_applied += 1;
+
+            let machine_state = self.state_machine.serialize().await;
+            self.respond_if_leader(entry, machine_state).await
         }
 
         self.update_state().await;   
+    }
+
+    async fn respond_if_leader(&self, entry: &LogEntry, output: Vec<u8>) {
+        match self.volatile_state.process_type {
+            
+            ProcessType::Leader => {
+
+                match &entry.content {
+                    LogEntryContent::Command {
+                        data: _,
+                        client_id,
+                        sequence_num,
+                        lowest_sequence_num_without_response: _,
+                    } => {
+                        let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
+                            client_id: *client_id,
+                            sequence_num: *sequence_num,
+                            content: CommandResponseContent::CommandApplied { output },
+                        });
+
+                        let leader_data = self.get_leader_data();
+                        let reply_to = leader_data.reply_to.get(client_id);
+
+                        match reply_to {
+
+                            None => { /* TODO: what to do here? */ },
+
+                            // TODO: igore errors?
+                            Some(reply_to) => match reply_to.send(response).await {
+                                _ => { /* Ignore errors, nothing to do if success */ },
+                            },
+                        }
+                        
+
+                    },
+        
+                    _ => { /* Nothing to respond to */ },
+                }
+            }
+
+            _ => { /* Only a leader responds to clients */ },
+        }
+        
     }
 
     /// Send log entries to `target` with indexes greater or equal to `next_index[&target]`
@@ -598,6 +702,13 @@ impl Raft {
             }
             
             _ => { /* Only a leader sends log entries */ }
+        }
+        
+    }
+
+    async fn send_entries_to_all(&self) {
+        for id in &self.config.servers {
+            self.send_entries(id).await;
         }
         
     }
@@ -749,7 +860,7 @@ impl Handler<Timeout> for Raft {
         match &mut self.volatile_state.process_type {
             ProcessType::Follower {}        => { self.init_vote().await; }
             ProcessType::Candidate { .. }   => { self.init_vote().await; }
-            ProcessType::Leader { .. }      => { }
+            ProcessType::Leader             => { }
         }
         
     }
@@ -760,7 +871,7 @@ impl Handler<Heartbeat> for Raft {
     async fn handle(&mut self, _: Heartbeat) {
         
         match &mut self.volatile_state.process_type {
-            ProcessType::Leader { .. } => { 
+            ProcessType::Leader => { 
 
                 self.broadcast_heartbeat().await;
             }

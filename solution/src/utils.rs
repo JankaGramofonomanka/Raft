@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use async_channel::Sender;
 use rand::Rng;
 
 use executor::ModuleRef;
@@ -46,7 +47,7 @@ pub enum Vote {
 pub enum ProcessType {
     Follower,
     Candidate { votes_received: HashSet<Uuid> },
-    Leader {},
+    Leader,
 }
 
 pub struct LeaderData {
@@ -55,6 +56,8 @@ pub struct LeaderData {
 
     // Number of followers that have `match_index` higher than `commit_index` of the leader
     pub(crate) num_updated_servers: usize,
+
+    pub(crate) reply_to: HashMap<Uuid, Sender<ClientRequestResponse>>
 }
 
 pub struct Heartbeat;
