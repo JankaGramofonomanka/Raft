@@ -123,9 +123,19 @@ impl Raft {
     }
 
     /// Common message processing.
-    fn msg_received(&mut self, msg: &RaftMessage) {
+    async fn msg_received(&mut self, msg: &RaftMessage) {
         if msg.header.term > self.persistent_state.current_term {
             self.update_term(msg.header.term);
+
+            match self.volatile_state.process_type {
+                ProcessType::Leader => {
+                    for entry in &self.persistent_state.log[self.volatile_state.commit_index..] {
+                        self.respond_not_leader(entry).await;
+                    }
+                },
+
+                _ => {}
+            }
             self.volatile_state.process_type = ProcessType::Follower;
             self.persistent_state.vote = Vote::Leader(msg.header.source);
             self.volatile_state.leader_data = None;
@@ -317,31 +327,6 @@ impl Raft {
             }
         }
     }
-
-    /*
-    async fn commit_one_entry(&self) {
-        
-        let index = self.volatile_state.commit_index + 1;
-        let entry = self.persistent_state.log[index];
-        
-        match &entry.content {
-            LogEntryContent::Command {
-                data,
-                client_id,
-                sequence_num,
-                lowest_sequence_num_without_response,
-            } => {
-                let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
-                    client_id,
-                    sequence_num,
-                    content: CommandResponseContent::CommandApplied { output: Vec<u8> },
-                });
-            },
-
-            _ => { /* Nothing to respond to */ },
-        }
-    }
-    */
 
 
     // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
@@ -633,49 +618,86 @@ impl Raft {
             self.volatile_state.last_applied += 1;
 
             let machine_state = self.state_machine.serialize().await;
-            self.respond_if_leader(entry, machine_state).await
+            self.respond_success_if_leader(entry, machine_state).await
         }
 
         self.update_state().await;   
     }
 
-    async fn respond_if_leader(&self, entry: &LogEntry, output: Vec<u8>) {
+    async fn respond_success_if_leader(&self, entry: &LogEntry, output: Vec<u8>) {
+
+        match &entry.content {
+            LogEntryContent::Command {
+                data: _,
+                client_id,
+                sequence_num,
+                lowest_sequence_num_without_response: _,
+            } => {
+                let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
+                    client_id: *client_id,
+                    sequence_num: *sequence_num,
+                    content: CommandResponseContent::CommandApplied { output },
+                });
+
+                self.respond_if_leader(client_id, response).await;
+                
+
+            },
+
+            _ => { /* Nothing to respond to */ },
+        }
+        
+    }
+
+    async fn respond_not_leader(&self, entry: &LogEntry) {
+
+        match &entry.content {
+            LogEntryContent::Command {
+                data: _,
+                client_id,
+                sequence_num,
+                lowest_sequence_num_without_response: _,
+            } => {
+                let leader_hint = match self.persistent_state.vote {
+                    Vote::Leader(leader_id) => Some(leader_id),
+                    _                       => None,
+                };
+
+                let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
+                    client_id: *client_id,
+                    sequence_num: *sequence_num,
+                    content: CommandResponseContent::NotLeader { leader_hint },
+                });
+
+                self.respond_if_leader(client_id, response).await;
+                
+
+            },
+
+            _ => { /* Nothing to respond to */ },
+        }
+        
+    }
+
+    async fn respond_if_leader(&self, client_id: &Uuid, response: ClientRequestResponse) {
         match self.volatile_state.process_type {
             
             ProcessType::Leader => {
-
-                match &entry.content {
-                    LogEntryContent::Command {
-                        data: _,
-                        client_id,
-                        sequence_num,
-                        lowest_sequence_num_without_response: _,
-                    } => {
-                        let response = ClientRequestResponse::CommandResponse(CommandResponseArgs {
-                            client_id: *client_id,
-                            sequence_num: *sequence_num,
-                            content: CommandResponseContent::CommandApplied { output },
-                        });
-
-                        let leader_data = self.get_leader_data();
-                        let reply_to = leader_data.reply_to.get(client_id);
-
-                        match reply_to {
-
-                            None => { /* TODO: what to do here? */ },
-
-                            // TODO: igore errors?
-                            Some(reply_to) => match reply_to.send(response).await {
-                                _ => { /* Ignore errors, nothing to do if success */ },
-                            },
-                        }
                         
 
+                let leader_data = self.get_leader_data();
+                let reply_to = leader_data.reply_to.get(client_id);
+
+                match reply_to {
+
+                    None => { /* TODO: what to do here? */ },
+
+                    // TODO: igore errors?
+                    Some(reply_to) => match reply_to.send(response).await {
+                        _ => { /* Ignore errors, nothing to do if success */ },
                     },
-        
-                    _ => { /* Nothing to respond to */ },
                 }
-            }
+            },
 
             _ => { /* Only a leader responds to clients */ },
         }
@@ -717,21 +739,6 @@ impl Raft {
         }
         
     }
-
-    /*
-    /// Returns latest common entry index assumming that commit indexes are the same
-    async fn latest_common_entry_index(&self, entries: Vec<LogEntry>) -> usize {
-        let mut common_index = self.volatile_state.commit_index;
-        for (entry1, entry2) in self.state.uncommited_entries.iter().zip(entries.iter()) {
-            if entry1 == entry2 {
-                common_index += 1;
-            } else {
-                break;
-            }
-        }
-        common_index
-    }
-    */
 
     /// Adds an entry to the log, but does not commit it yet
     fn add_log_entry(&mut self, entry: LogEntry) {
@@ -793,7 +800,7 @@ impl Raft {
 impl Handler<RaftMessage> for Raft {
     async fn handle(&mut self, msg: RaftMessage) {
         
-        self.msg_received(&msg);
+        {self.msg_received(&msg).await;}
 
         match msg.content {
             RaftMessageContent::AppendEntries(args)
