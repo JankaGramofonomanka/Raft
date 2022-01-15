@@ -581,6 +581,39 @@ impl Raft {
         
     }
 
+    async fn handle_register_client(&mut self, reply_to: Sender<ClientRequestResponse>) {
+
+        match self.volatile_state.process_type {
+            ProcessType::Leader {} => {
+                let entry = LogEntry {
+                    content: LogEntryContent::RegisterClient,
+                    term: self.persistent_state.current_term,
+                    timestamp: SystemTime::now(),
+                };
+        
+                self.add_log_entry_with_sender(entry, reply_to);
+                self.send_entries_to_all().await;
+            }
+
+            _ => {
+                let leader_hint = match self.persistent_state.vote {
+                    Vote::Leader(leader_id) => Some(leader_id),
+                    _                       => None,
+                };
+
+                let response = ClientRequestResponse::RegisterClientResponse(
+                    RegisterClientResponseArgs {
+                        content: RegisterClientResponseContent::NotLeader { leader_hint },
+                    }
+                );
+
+                match reply_to.send(response).await {
+                    _ => { /* Ignore errors, nothing to do if success */ },
+                }
+            }
+        }
+    }
+
     // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
     // More Utils
     // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
@@ -654,7 +687,20 @@ impl Raft {
 
             },
 
-            _ => { /* Nothing to respond to */ },
+            LogEntryContent::RegisterClient => {
+                
+                let response = ClientRequestResponse::RegisterClientResponse(
+                    RegisterClientResponseArgs {
+                        content: RegisterClientResponseContent::ClientRegistered { 
+                            client_id: Uuid::from_u128(log_index as u128),
+                        },
+                    }
+                );
+
+                self.respond_if_leader(log_index, response).await;
+            },
+
+            LogEntryContent::Configuration { .. } => { /* Nothing to respond to */ },
         }
         
     }
@@ -684,7 +730,22 @@ impl Raft {
 
             },
 
-            _ => { /* Nothing to respond to */ },
+            LogEntryContent::RegisterClient => {
+                let leader_hint = match self.persistent_state.vote {
+                    Vote::Leader(leader_id) => Some(leader_id),
+                    _                       => None,
+                };
+
+                let response = ClientRequestResponse::RegisterClientResponse(
+                    RegisterClientResponseArgs {
+                        content: RegisterClientResponseContent::NotLeader { leader_hint },
+                    }
+                );
+
+                self.respond_if_leader(log_index, response).await;
+            },
+
+            LogEntryContent::Configuration { .. } => { /* Nothing to respond to */ },
         }
         
     }
@@ -692,7 +753,6 @@ impl Raft {
     async fn respond_if_leader(&self, log_index: usize, response: ClientRequestResponse) {
         
         if self.is_leader() {
-                        
 
             let leader_data = self.get_leader_data();
             let reply_to = leader_data.reply_to.get(&log_index);
@@ -862,10 +922,11 @@ impl Handler<ClientRequest> for Raft {
                 lowest_sequence_num_without_response
             ).await,
 
-            ClientRequestContent::Snapshot            => unimplemented!("Snapshots omitted"),
-            ClientRequestContent::AddServer { .. }    => unimplemented!("Cluster membership changes omitted"),
-            ClientRequestContent::RemoveServer { .. } => unimplemented!("Cluster membership changes omitted"),
-            ClientRequestContent::RegisterClient      => todo!(),
+            ClientRequestContent::Snapshot              => unimplemented!("Snapshots omitted"),
+            ClientRequestContent::AddServer { .. }      => unimplemented!("Cluster membership changes omitted"),
+            ClientRequestContent::RemoveServer { .. }   => unimplemented!("Cluster membership changes omitted"),
+            
+            ClientRequestContent::RegisterClient        => self.handle_register_client(msg.reply_to).await,
         }
     }
 }
@@ -882,8 +943,6 @@ impl Handler<Init> for Raft {
         
     }
 }
-
-
 
 /// Handle timer timeout.
 #[async_trait::async_trait]
