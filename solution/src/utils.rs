@@ -78,9 +78,10 @@ pub(crate) async fn run_timer(
 ) {
     while !abort.load(Ordering::Relaxed) {
         let duration = rand::thread_rng().gen_range(interval_range.clone());
-        let mut interval = tokio::time::interval(duration);
+        
+        {tokio::time::sleep(duration).await;}
         raft_ref.send(Timeout).await;
-        interval.tick().await;
+        
     }
 }
 
