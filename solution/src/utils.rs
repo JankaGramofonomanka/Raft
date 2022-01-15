@@ -57,7 +57,7 @@ pub struct LeaderData {
     // Number of followers that have `match_index` higher than `commit_index` of the leader
     pub(crate) num_updated_servers: usize,
 
-    pub(crate) reply_to: HashMap<Uuid, Sender<ClientRequestResponse>>,
+    pub(crate) reply_to: HashMap<usize, Sender<ClientRequestResponse>>,
     pub(crate) successes: HashSet<Uuid>,
 }
 

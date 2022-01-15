@@ -134,17 +134,25 @@ impl Raft {
     }
 
     async fn convert_to_follower(&mut self) {
-        match self.volatile_state.process_type {
-            ProcessType::Leader => {
-                for entry in &self.persistent_state.log[self.volatile_state.commit_index..] {
-                    self.respond_not_leader(entry).await;
-                }
-            },
-
-            _ => {}
+        
+        if self.is_leader() {
+            let from = self.volatile_state.commit_index;
+            let to = self.persistent_state.log.len();
+            for log_index in from..to {
+                let entry = &self.persistent_state.log[log_index];
+                self.respond_not_leader(log_index, entry).await;
+            }
         }
+
         self.volatile_state.process_type = ProcessType::Follower;
         self.volatile_state.leader_data = None;
+    }
+
+    fn is_leader(&self) -> bool {
+        match self.volatile_state.process_type {
+            ProcessType::Leader => true,
+            _                   => false,
+        }
     }
 
     // send / broadcast -------------------------------------------------------
@@ -198,31 +206,27 @@ impl Raft {
 
             // Check if `self` is still a leader in every iteration to avoid a 
             // panic in `get_next_index` call
-            match &self.volatile_state.process_type {
-                ProcessType::Leader => {
-                    let prev_index = self.get_next_index(&id) - 1;
-                    self.sender
-                    .send(
-                        &id,
-                        RaftMessage {
-                            header: RaftMessageHeader {
-                                source: self.config.self_id,
-                                term:   self.persistent_state.current_term,
-                            },
-
-                            // TODO: what to put in `prev_log_index` and `prev_log_term`?
-                            content: RaftMessageContent::AppendEntries(AppendEntriesArgs {
-                                prev_log_index: prev_index,
-                                prev_log_term:  self.get_term(prev_index),
-                                entries:        vec![],
-                                leader_commit:  self.volatile_state.commit_index,
-                            })
+            if self.is_leader() {
+                let prev_index = self.get_next_index(&id) - 1;
+                self.sender
+                .send(
+                    &id,
+                    RaftMessage {
+                        header: RaftMessageHeader {
+                            source: self.config.self_id,
+                            term:   self.persistent_state.current_term,
                         },
-                    )
-                    .await;
-                }
-                
-                _ => { /* Only leader sends heartbeats */ }
+
+                        // TODO: what to put in `prev_log_index` and `prev_log_term`?
+                        content: RaftMessageContent::AppendEntries(AppendEntriesArgs {
+                            prev_log_index: prev_index,
+                            prev_log_term:  self.get_term(prev_index),
+                            entries:        vec![],
+                            leader_commit:  self.volatile_state.commit_index,
+                        })
+                    },
+                )
+                .await;
             }
             
         }
@@ -403,39 +407,35 @@ impl Raft {
         args: AppendEntriesResponseArgs,
     ) {
 
-        match self.volatile_state.process_type {
-            ProcessType::Leader => {
+        if self.is_leader() {
 
-                // TODO: why this was in the algo?
-                /*
-                if args.last_log_index > self.get_next_index(&msg_header.source) {
+            // TODO: why this was in the algo?
+            /*
+            if args.last_log_index > self.get_next_index(&msg_header.source) {
+                self.send_entries(&msg_header.source).await;
+            }
+            */
+
+            if args.success {
+                self.mark_successful_heartbeat(msg_header.source);
+                self.update_next_index(msg_header.source, args.last_log_index + 1);
+                self.update_match_index(msg_header.source, args.last_log_index).await;
+
+                if args.last_log_index < self.get_last_log_index() {
                     self.send_entries(&msg_header.source).await;
                 }
-                */
 
-                if args.success {
-                    self.mark_successful_heartbeat(msg_header.source);
-                    self.update_next_index(msg_header.source, args.last_log_index + 1);
-                    self.update_match_index(msg_header.source, args.last_log_index).await;
+            } else if args.last_log_index + 1 < self.get_next_index(&msg_header.source) {
+                // this means the follower has a shorter log
+                self.update_next_index(msg_header.source, args.last_log_index + 1);
+                self.send_entries(&msg_header.source).await;
 
-                    if args.last_log_index < self.get_last_log_index() {
-                        self.send_entries(&msg_header.source).await;
-                    }
-
-                } else if args.last_log_index + 1 < self.get_next_index(&msg_header.source) {
-                    // this means the follower has a shorter log
-                    self.update_next_index(msg_header.source, args.last_log_index + 1);
-                    self.send_entries(&msg_header.source).await;
-
-                } else {
-                    // this means the entries of the follower do not match
-                    self.update_next_index(msg_header.source, self.get_next_index(&msg_header.source) - 1);
-                    self.send_entries(&msg_header.source).await;
-                }
-                
-            },
-
-            _ => { /* nothing to do */ },
+            } else {
+                // this means the entries of the follower do not match
+                self.update_next_index(msg_header.source, self.get_next_index(&msg_header.source) - 1);
+                self.send_entries(&msg_header.source).await;
+            }
+            
         }
         
     }
@@ -557,10 +557,7 @@ impl Raft {
                     timestamp: SystemTime::now(),
                 };
         
-                let leader_data = self.get_leader_data_mut();
-                leader_data.reply_to.insert(client_id, reply_to);
-                
-                self.add_log_entry(entry);
+                self.add_log_entry_with_sender(entry, reply_to);
                 self.send_entries_to_all().await;
             }
 
@@ -624,19 +621,20 @@ impl Raft {
 
         self.volatile_state.commit_index = commit_index;
 
-        for entry in &self.persistent_state.log[from..to] {
+        for log_index in from..to {
+            let entry = &self.persistent_state.log[log_index];
             let serialized = bincode::serialize(&entry).unwrap();
             {self.state_machine.apply(&serialized[..]).await;}
             self.volatile_state.last_applied += 1;
 
             let machine_state = self.state_machine.serialize().await;
-            self.respond_success_if_leader(entry, machine_state).await
+            self.respond_success_if_leader(log_index, entry, machine_state).await
         }
 
         self.update_state().await;   
     }
 
-    async fn respond_success_if_leader(&self, entry: &LogEntry, output: Vec<u8>) {
+    async fn respond_success_if_leader(&self, log_index: usize, entry: &LogEntry, output: Vec<u8>) {
 
         match &entry.content {
             LogEntryContent::Command {
@@ -651,7 +649,7 @@ impl Raft {
                     content: CommandResponseContent::CommandApplied { output },
                 });
 
-                self.respond_if_leader(client_id, response).await;
+                self.respond_if_leader(log_index, response).await;
                 
 
             },
@@ -661,7 +659,7 @@ impl Raft {
         
     }
 
-    async fn respond_not_leader(&self, entry: &LogEntry) {
+    async fn respond_not_leader(&self, log_index: usize, entry: &LogEntry) {
 
         match &entry.content {
             LogEntryContent::Command {
@@ -681,7 +679,7 @@ impl Raft {
                     content: CommandResponseContent::NotLeader { leader_hint },
                 });
 
-                self.respond_if_leader(client_id, response).await;
+                self.respond_if_leader(log_index, response).await;
                 
 
             },
@@ -691,27 +689,23 @@ impl Raft {
         
     }
 
-    async fn respond_if_leader(&self, client_id: &Uuid, response: ClientRequestResponse) {
-        match self.volatile_state.process_type {
-            
-            ProcessType::Leader => {
+    async fn respond_if_leader(&self, log_index: usize, response: ClientRequestResponse) {
+        
+        if self.is_leader() {
                         
 
-                let leader_data = self.get_leader_data();
-                let reply_to = leader_data.reply_to.get(client_id);
+            let leader_data = self.get_leader_data();
+            let reply_to = leader_data.reply_to.get(&log_index);
 
-                match reply_to {
+            match reply_to {
 
-                    None => { /* TODO: what to do here? */ },
+                None => { /* TODO: what to do here? */ },
 
-                    // TODO: igore errors?
-                    Some(reply_to) => match reply_to.send(response).await {
-                        _ => { /* Ignore errors, nothing to do if success */ },
-                    },
-                }
-            },
-
-            _ => { /* Only a leader responds to clients */ },
+                // TODO: igore errors?
+                Some(reply_to) => match reply_to.send(response).await {
+                    _ => { /* Ignore errors, nothing to do if success */ },
+                },
+            }
         }
         
     }
@@ -755,6 +749,21 @@ impl Raft {
     /// Adds an entry to the log, but does not commit it yet
     fn add_log_entry(&mut self, entry: LogEntry) {
         self.persistent_state.log.push(entry);
+    }
+
+    fn add_log_entry_with_sender(
+        &mut self,
+        entry: LogEntry,
+        reply_to: Sender<ClientRequestResponse>,
+    ) {
+        self.add_log_entry(entry);
+        let index = self.get_last_log_index();
+
+        if self.is_leader() {
+            let leader_data = self.get_leader_data_mut();
+            leader_data.reply_to.insert(index, reply_to);
+        }
+        
     }
 
     /// Adds entries to the log, but does not commit them yet, 
@@ -890,7 +899,6 @@ impl Handler<Timeout> for Raft {
                 if data.successes.len() <= self.config.servers.len() / 2 {
                     self.convert_to_follower().await;
                 }
-                
             }
         }
         
@@ -901,16 +909,7 @@ impl Handler<Timeout> for Raft {
 impl Handler<Heartbeat> for Raft {
     async fn handle(&mut self, _: Heartbeat) {
         
-        match &mut self.volatile_state.process_type {
-            ProcessType::Leader => { 
-
-                self.broadcast_heartbeat().await;
-            }
-
-            // Only a leader sends a heartbeat
-            _ => {}
-        }
-        
+        if self.is_leader() { self.broadcast_heartbeat().await; }
     }
 }
 
