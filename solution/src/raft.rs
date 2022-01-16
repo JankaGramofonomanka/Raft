@@ -13,7 +13,15 @@ use executor::{Handler, ModuleRef, System};
 use crate::domain::*;
 use crate::utils::*;
 
-const STATE_KEY: &str = "STATE";
+const TERM_KEY:         &str = "TERM";
+const VOTE_KEY:         &str = "VOTE";
+const NUM_ENTRIES_KEY:  &str = "NUM_ENTRIES";
+
+#[allow(non_snake_case)]
+fn MK_LOG_ENTRY_KEY(index: usize) -> String {
+    format!("LOG{}", index)
+}
+
 
 pub struct Raft {
     // TODO you can add fields to this struct.
@@ -49,14 +57,24 @@ impl Raft {
             timestamp: first_log_entry_timestamp,
         };
 
-        let persistent_state = match stable_storage.get(STATE_KEY).await {
-            Some(data) => bincode::deserialize(&data[..]).unwrap(),
-            None => PersistentState {
-                current_term:       0,
-                vote:               Vote::NoVote,
-                log:                vec![first_entry],
+        let current_term = from_option_deserialize(0, &stable_storage.get(TERM_KEY).await);
+        let vote = from_option_deserialize(Vote::NoVote, &stable_storage.get(VOTE_KEY).await);
+        let num_entries: usize = from_option_deserialize(0, &stable_storage.get(NUM_ENTRIES_KEY).await);
+
+        let mut log: Vec<LogEntry> = vec![];
+        if num_entries == 0 {
+            log.push(first_entry);
+        } else {
+            for index in 0..num_entries {
+                let entry: LogEntry = bincode::deserialize(
+                    &stable_storage.get(&MK_LOG_ENTRY_KEY(index)).await.unwrap()[..]
+                ).unwrap();
+                log.push(entry);
             }
-        };
+        }
+        
+
+        let persistent_state = PersistentState { current_term, vote, log, };
 
         let volatile_state = VolatileState {
             commit_index:   0,
@@ -115,26 +133,37 @@ impl Raft {
     // other utils ------------------------------------------------------------
 
     /// Set the process's term to the higher number.
-    fn update_term(&mut self, new_term: u64) {
+    async fn update_term(&mut self, new_term: u64) {
         assert!(self.persistent_state.current_term < new_term);
         self.persistent_state.current_term = new_term;
-        self.persistent_state.vote = Vote::NoVote;
-        // No reliable state update called here, must be called separately.
+        self.update_vote(Vote::NoVote).await;
+        
+        self.storage.put(TERM_KEY, &bincode::serialize(&new_term).unwrap()[..]).await.unwrap();
     }
 
-    /// Reliably save the state.
-    async fn update_state(&mut self) {
-        self.storage.put(STATE_KEY, &bincode::serialize(&self.persistent_state).unwrap()[..]).await.unwrap();
+    async fn update_vote(&mut self, vote: Vote) {
+        self.persistent_state.vote = vote;
+        self.storage.put(VOTE_KEY, &bincode::serialize(&vote).unwrap()[..]).await.unwrap();
+    }
+
+    /// Stores a log entry nut does not update number of log entries
+    async fn update_log_entry(&mut self, log_index: usize) {
+        let entry = &self.persistent_state.log[log_index];
+        self.storage.put(&MK_LOG_ENTRY_KEY(log_index), &bincode::serialize(entry).unwrap()[..]).await.unwrap();
+    }
+
+    async fn update_num_entries(&mut self) {
+        let index = self.get_last_log_index() + 1;
+        self.storage.put(NUM_ENTRIES_KEY, &bincode::serialize(&index).unwrap()[..]).await.unwrap();
     }
 
     /// Common message processing.
-    fn msg_received(&mut self, msg_header: &RaftMessageHeader) {
+    async fn msg_received(&mut self, msg_header: &RaftMessageHeader) {
         if msg_header.term > self.persistent_state.current_term {
-            self.update_term(msg_header.term);
+            self.update_term(msg_header.term).await;
 
             self.convert_to_follower();
-            self.persistent_state.vote = Vote::Leader(msg_header.source);
-            
+            self.update_vote(Vote::Leader(msg_header.source)).await;
         }
     }
 
@@ -177,6 +206,7 @@ impl Raft {
 
     /// Send a message
     async fn send(&self, target: &Uuid, content: RaftMessageContent) {
+
         let msg = RaftMessage {
             header: RaftMessageHeader {
                 source: self.config.self_id,
@@ -206,7 +236,6 @@ impl Raft {
                 self.send(
                     &id,
                     
-                    // TODO: what to put in `prev_log_index` and `prev_log_term`?
                     RaftMessageContent::AppendEntries(AppendEntriesArgs {
                             prev_log_index: prev_index,
                             prev_log_term:  self.get_term(prev_index),
@@ -358,7 +387,6 @@ impl Raft {
                 }),
             ).await;
 
-            // TODO is return necessary?
             return;
 
         }
@@ -366,12 +394,11 @@ impl Raft {
         self.reset_timer();
         self.last_leader_msg = SystemTime::now();
 
-        self.persistent_state.vote = Vote::Leader(msg_header.source);
-        {self.update_state().await;}
+        { self.update_vote(Vote::Leader(msg_header.source)).await; }
 
         if self.prev_log_entry_matches(args.prev_log_index, args.prev_log_term) {
 
-            self.add_log_entries(args.entries, args.prev_log_index);
+            { self.add_log_entries(args.entries, args.prev_log_index).await; }
             self.send(
                 &msg_header.source, 
                 RaftMessageContent::AppendEntriesResponse(AppendEntriesResponseArgs {
@@ -390,7 +417,6 @@ impl Raft {
                 }),
             ).await;
 
-            // TODO is return necessary?
             return;
         }
 
@@ -410,7 +436,7 @@ impl Raft {
             if args.success {
                 self.mark_successful_heartbeat(msg_header.source);
                 self.update_next_index(msg_header.source, args.last_log_index + 1);
-                self.update_match_index(msg_header.source, args.last_log_index).await;
+                { self.update_match_index(msg_header.source, args.last_log_index).await; }
 
                 if args.last_log_index < self.get_last_log_index() {
                     self.send_entries(&msg_header.source).await;
@@ -469,10 +495,7 @@ impl Raft {
                 },
             };
 
-        if granted { 
-            self.persistent_state.vote = Vote::VotedFor(msg_header.source);
-            self.update_state().await;
-        }
+        if granted { self.update_vote(Vote::VotedFor(msg_header.source)).await; }
 
         self.send(
             &msg_header.source, 
@@ -531,9 +554,8 @@ impl Raft {
                     timestamp: SystemTime::now(),
                 };
         
-                self.add_log_entry_with_sender(entry, reply_to);
-                self.update_match_index(self.config.self_id, self.volatile_state.commit_index + 1).await;
-                self.send_entries_to_all().await;
+                { self.add_log_entry_with_sender(entry, reply_to).await; }
+                { self.send_entries_to_all().await; }
             }
 
             _ => {
@@ -564,9 +586,8 @@ impl Raft {
                     timestamp: SystemTime::now(),
                 };
         
-                self.add_log_entry_with_sender(entry, reply_to);
-                self.update_match_index(self.config.self_id, self.volatile_state.commit_index + 1).await;
-                self.send_entries_to_all().await;
+                { self.add_log_entry_with_sender(entry, reply_to).await; }
+                { self.send_entries_to_all().await; }
             }
 
             _ => {
@@ -593,17 +614,18 @@ impl Raft {
     /// Initialize the vote
     async fn init_vote(&mut self) {
 
-        self.update_term(self.persistent_state.current_term + 1);
-        self.reset_timer();
+        {
+            self.update_term(self.persistent_state.current_term + 1).await;
+            self.reset_timer();
 
-        let mut votes = HashSet::new();
-        votes.insert(self.config.self_id);
-        self.volatile_state.process_type = ProcessType::Candidate { votes_received: votes };
-        self.volatile_state.leader_data = None;
-        self.check_if_elected();
-        
-        self.persistent_state.vote = Vote::VotedFor(self.config.self_id);
-        {self.update_state().await;}
+            let mut votes = HashSet::new();
+            votes.insert(self.config.self_id);
+            self.volatile_state.process_type = ProcessType::Candidate { votes_received: votes };
+            self.volatile_state.leader_data = None;
+            self.check_if_elected();
+            
+            self.update_vote(Vote::VotedFor(self.config.self_id)).await;
+        }
         
         self.broadcast(
             RaftMessageContent::RequestVote (
@@ -656,8 +678,6 @@ impl Raft {
             self.commit(log_index).await;
             
         }
-
-        self.update_state().await;   
     }
 
     /// Commits an entry with index `log_index` and 
@@ -764,32 +784,44 @@ impl Raft {
     }
 
     /// Adds an entry to the log, but does not commit it yet
-    fn add_log_entry(&mut self, entry: LogEntry) {
-        self.persistent_state.log.push(entry);
+    async fn add_log_entry(&mut self, entry: LogEntry) {
+        self.persistent_state.log.push(entry.clone());
+        let index = self.get_last_log_index();
+        self.update_log_entry(index).await;
+        self.update_num_entries().await;
     }
 
     /// Adds an entry to the log and saves the reply sender
-    fn add_log_entry_with_sender(
+    async fn add_log_entry_with_sender(
         &mut self,
         entry: LogEntry,
         reply_to: Sender<ClientRequestResponse>,
     ) {
-        self.add_log_entry(entry);
+        self.add_log_entry(entry).await;
         let index = self.get_last_log_index();
 
         if self.is_leader() {
             let leader_data = self.get_leader_data_mut();
             leader_data.reply_to.insert(index, reply_to);
+            
+            self.update_next_index(self.config.self_id, self.get_last_log_index() + 1);
+            self.update_match_index(self.config.self_id, self.get_last_log_index()).await;
+            
         }
         
     }
 
     /// Adds entries to the log, but does not commit them yet, 
     /// overwiting all entries after the entry with index `last_index`
-    fn add_log_entries(&mut self, entries: Vec<LogEntry>, last_index: usize) {
+    async fn add_log_entries(&mut self, entries: Vec<LogEntry>, last_index: usize) {
 
         self.persistent_state.log.truncate(last_index + 1);
         self.persistent_state.log.append(&mut entries.clone());
+
+        for index in last_index + 1..self.get_last_log_index() {
+            self.update_log_entry(index).await;
+        }
+        self.update_num_entries().await;
         
     }
 
@@ -826,6 +858,12 @@ impl Raft {
             println!("-------------------------------------------------------------------------------");
             println!("elapsed: {}", self.start.elapsed().unwrap().as_millis());
             println!("ID: {:?}, TERM: {}, STATE: {:#?}", self.config.self_id, self.persistent_state.current_term, self.volatile_state.process_type);
+            match &self.volatile_state.leader_data {
+                None => {},
+                Some(data) => {
+                    println!("LEADER DATA: {:#?}", data);
+                }
+            }
             println!("{}:\n{:#?}\n\n\n", title, msg);
         }
     }
@@ -843,13 +881,13 @@ impl Handler<RaftMessage> for Raft {
         match msg.content {
             RaftMessageContent::AppendEntries(args)
                 => {
-                    self.msg_received(&msg.header);
+                    { self.msg_received(&msg.header).await; }
                     self.handle_append_entries(msg.header, args).await;
                 },
 
             RaftMessageContent::AppendEntriesResponse(args)
                 => {
-                    self.msg_received(&msg.header);
+                    { self.msg_received(&msg.header).await; }
                     self.handle_append_entries_resp(msg.header, args).await;
                 },
 
@@ -861,14 +899,14 @@ impl Handler<RaftMessage> for Raft {
                          * election timeout of hearing from a current leader 
                          */
                     } else {
-                        self.msg_received(&msg.header);
+                        { self.msg_received(&msg.header).await; }
                         self.handle_request_vote(msg.header, args).await;
                     }
                 },
 
             RaftMessageContent::RequestVoteResponse(args)
                 => {
-                    self.msg_received(&msg.header);
+                    { self.msg_received(&msg.header).await; }
                     self.handle_request_vote_resp(msg.header, args).await;
                 },
 
@@ -933,16 +971,17 @@ impl Handler<Timeout> for Raft {
                 let num_servers = self.config.servers.len();
                 let data = self.get_leader_data_mut();
 
-                // `self` is not included in `data.successs`, 
-                // therefore subtract 1`
-                if data.successes.len() <= (num_servers / 2) - 1 {
-                    self.convert_to_follower();
-                    self.update_term(self.persistent_state.current_term + 1);
-                    
-                } else {
-                    data.successes = HashSet::new();
+                if num_servers > 1 {
+                    // `self` is not included in `data.successs`, 
+                    // therefore subtract 1`
+                    if data.successes.len() <= (num_servers / 2) - 1 {
+                        self.convert_to_follower();
+                        self.update_term(self.persistent_state.current_term + 1).await;
+                        
+                    } else {
+                        data.successes = HashSet::new();
+                    }
                 }
-                
             }
         }
         

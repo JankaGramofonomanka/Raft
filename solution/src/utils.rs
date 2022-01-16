@@ -51,6 +51,7 @@ pub enum ProcessType {
     Leader,
 }
 
+#[derive(Debug)]
 pub struct LeaderData {
     pub(crate) next_index:  HashMap<Uuid, usize>,
     pub(crate) match_index: HashMap<Uuid, usize>,
@@ -85,8 +86,6 @@ pub(crate) async fn run_timer(
         
         raft_ref.send(Timeout).await;
         tokio::time::sleep(duration).await;
-        
-        
     }
 }
 
@@ -103,3 +102,12 @@ pub(crate) async fn run_heartbeat(
     }
 }
 
+pub(crate) fn from_option_deserialize<'a, T>(if_none: T, some: &'a Option<Vec<u8>>) -> T
+where
+    T: serde::de::Deserialize<'a>
+{
+    match some {
+        None        => if_none,
+        Some(data)  => bincode::deserialize(&data[..]).unwrap(),
+    }
+}
