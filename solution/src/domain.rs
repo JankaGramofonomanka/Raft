@@ -56,11 +56,13 @@ pub struct ServerConfig {
 // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
 // CLIENT REQUEST / RESPONSE
 // -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+#[derive(Clone, Debug)]
 pub struct ClientRequest {
     pub reply_to: Sender<ClientRequestResponse>,
     pub content: ClientRequestContent,
 }
 
+#[derive(Clone, Debug)]
 pub enum ClientRequestContent {
     /// Apply a command to the state machine.
     Command {

@@ -44,6 +44,7 @@ pub enum Vote {
 }
 
 /// State of a Raft process with a corresponding (volatile) information.
+#[derive(Debug)]
 pub enum ProcessType {
     Follower,
     Candidate { votes_received: HashSet<Uuid> },
@@ -74,13 +75,17 @@ pub struct Init {
 pub(crate) async fn run_timer(
     raft_ref: ModuleRef<Raft>,
     interval_range: RangeInclusive<Duration>,
-    abort: Arc<AtomicBool>
+    abort: Arc<AtomicBool>,
 ) {
+    let duration = rand::thread_rng().gen_range(interval_range.clone());
+    {tokio::time::sleep(duration).await;}
+
     while !abort.load(Ordering::Relaxed) {
         let duration = rand::thread_rng().gen_range(interval_range.clone());
         
-        {tokio::time::sleep(duration).await;}
         raft_ref.send(Timeout).await;
+        tokio::time::sleep(duration).await;
+        
         
     }
 }
